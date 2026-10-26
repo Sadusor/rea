@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
 import { access, realpath } from "node:fs/promises";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 
 const TOOL_NAMES = ["node", "npm", "npx"] as const;
 const PROBE_CONCURRENCY = 4;
@@ -153,7 +153,12 @@ const probeCandidate = async (
   effectivePath: string,
 ): Promise<RuntimeExecutableDiagnostic> => {
   const canonical = await canonicalPath(candidate.path);
-  const result = await executeVersion(candidate.path, timeoutMs, effectivePath);
+  const result = await executeVersion(
+    candidate.tool,
+    candidate.path,
+    timeoutMs,
+    effectivePath,
+  );
   const identity = {
     tool: candidate.tool,
     lexical_path: candidate.path,
@@ -176,16 +181,45 @@ type VersionResult =
   | { readonly ok: false; readonly failure: RuntimeProbeFailure };
 
 const executeVersion = (
+  tool: RuntimeToolName,
   path: string,
   timeoutMs: number | undefined,
   effectivePath: string,
 ): Promise<VersionResult> =>
   new Promise((resolve) => {
-    const child = spawn(path, ["--version"], {
-      windowsHide: true,
-      env: environmentWithPath(effectivePath),
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const npmShim =
+      process.platform === "win32" &&
+      (tool === "npm" || tool === "npx") &&
+      /\.(cmd|bat)$/i.test(path);
+
+    const command = npmShim ? process.execPath : path;
+    const args = npmShim
+      ? [
+          join(dirname(path), "node_modules", "npm", "bin", `${tool}-cli.js`),
+          "--version",
+        ]
+      : ["--version"];
+
+    let child: ChildProcess;
+    try {
+      child = spawn(command, args, {
+        windowsHide: true,
+        env: environmentWithPath(effectivePath),
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (cause) {
+      resolve({
+        ok: false,
+        failure: {
+          code: "runtime_spawn_failed",
+          exit_code: null,
+          signal: null,
+          dependency: null,
+          stderr: String(cause),
+        },
+      });
+      return;
+    }
     let stdout = "";
     let stderr = "";
     let spawnError: Error | undefined;
